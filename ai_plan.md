@@ -178,3 +178,43 @@ Check that:
 Let's generate a proper .gitignore file for python and vscode
 
 ## Prompt
+I don't like cleaner.py. Every function does too much work. Let's split it too smaller functions keeping the same fucntionality
+
+```
+_strip_strings — whitespace trimming
+_normalize_country — uppercase + blank warning
+_parse_customer_signup_date — date parse + drop
+_drop_duplicate_customers — dedup + warn
+_drop_unknown_customers — customer_id validation
+_parse_start_date / _parse_end_date / _parse_monthly_price — one field each
+_drop_invalid_date_range — chronological check
+_warn_overlapping — overlap detection (unchanged)
+```
+
+## Prompt
+As we can reuse cleaning function in future, let's make them "public" and write a test not only for overall functionality but also for those small components
+
+## Prompt
+When we clean data and see some dataquality errors we log the "warning" and continue. It could be fine but is a potential risk. Let's create a csv-file with problematic records from the corresponding source file in a separate directory per ETL-run.
+Also, let's create a component that will do this error processing.
+
+```
+New: src/error_sink.py
+
+RejectedRows — accumulates dropped rows from one source file, each tagged with a _rejection_reason column via .add(frame, reason)
+write_quarantine(rejected, run_dir) — writes one <stem>_errors.csv per source under quarantine/<timestamp>/; skips creating the directory entirely when nothing was rejected
+Changed: src/cleaner.py
+
+All dropping helpers (parse_customer_signup_date, drop_duplicate_customers, drop_unknown_customers, parse_start_date, parse_end_date, parse_monthly_price, drop_invalid_date_range) now return (clean_df, rejected_df) instead of just the clean half
+clean_customers and clean_subscriptions accept a source parameter, build a RejectedRows object internally, and return (clean_df, rejected) — the caller decides what to do with rejected rows
+normalize_country optionally accepts a RejectedRows to flag blank-country rows (kept but visible in the quarantine file)
+Changed: main.py — unpacks the tuples, passes source filenames, calls write_quarantine; adds --quarantine-dir CLI option (default: quarantine/)
+
+New: tests/test_error_sink.py — 10 tests covering RejectedRows and write_quarantine; all cleaner tests updated for the new tuple signatures.
+```
+
+## Prompt
+Let's add requirements.txt containig the corresponding libraries to make an alternative way of running the pipeline.
+
+## Prompt
+And now let's create a concise README with very basic information on how to run the pipeline and the tests.

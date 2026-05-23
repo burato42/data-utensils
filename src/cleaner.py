@@ -4,6 +4,8 @@ from datetime import date
 import pandas as pd
 from loguru import logger
 
+from src.error_sink import RejectedRows
+
 
 @dataclass
 class Customer:
@@ -21,110 +23,158 @@ class Subscription:
     monthly_price: float
 
 
-def clean_customers(raw: pd.DataFrame) -> pd.DataFrame:
+# --- customers ---
+
+def clean_customers(raw: pd.DataFrame, source: str = "customers") -> tuple[pd.DataFrame, RejectedRows]:
     """
     Validate and clean the customers DataFrame.
 
-    Drops rows with unparseable signup_date. Deduplicates on customer_id (keep first).
-    Normalizes country to uppercase. Returns DataFrame with signup_date as datetime64.
-    """
-    df = raw.copy()
+    Drops rows with unparseable signup_date and duplicate customer_ids (keep first).
+    Normalizes country to uppercase. Rows with a blank country are kept but flagged.
 
-    # Strip whitespace from all string columns
+    Returns (clean_df, rejected) where rejected accumulates all dropped rows with reasons.
+    """
+    rejected = RejectedRows(source=source)
+    df = strip_strings(raw.copy())
+    df = normalize_country(df, rejected)
+    df, rej = parse_customer_signup_date(df)
+    rejected.add(rej, "invalid signup_date")
+    df, rej = drop_duplicate_customers(df)
+    rejected.add(rej, "duplicate customer_id")
+    return df.reset_index(drop=True), rejected
+
+
+def strip_strings(df: pd.DataFrame) -> pd.DataFrame:
+    """Strip leading/trailing whitespace from all string columns."""
     for col in df.select_dtypes(include=["object", "str"]).columns:
         df[col] = df[col].str.strip()
-
-    # Warn about blank country but keep the row
-    blank_country = df["country"].isna() | (df["country"] == "")
-    for cid in df.loc[blank_country, "customer_id"]:
-        logger.warning(f"Customer {cid} has blank country")
-    df["country"] = df["country"].str.upper()
-
-    # Parse signup_date — drop rows that fail
-    parsed = pd.to_datetime(df["signup_date"], format="%Y-%m-%d", errors="coerce")
-    bad_date = parsed.isna()
-    for cid in df.loc[bad_date, "customer_id"]:
-        logger.warning(f"Customer {cid} has invalid signup_date — row dropped")
-    df = df[~bad_date].copy()
-    df["signup_date"] = parsed[~bad_date]
-
-    # Deduplicate customer_id — keep first
-    dupes = df.duplicated(subset="customer_id", keep="first")
-    for cid in df.loc[dupes, "customer_id"]:
-        logger.warning(f"Duplicate customer_id {cid} — keeping first occurrence, dropping duplicate")
-    df = df[~dupes].reset_index(drop=True)
-
     return df
 
 
-def clean_subscriptions(raw: pd.DataFrame, valid_customer_ids: set[str]) -> pd.DataFrame:
+def normalize_country(df: pd.DataFrame, rejected: RejectedRows | None = None) -> pd.DataFrame:
+    """Uppercase the country column; log a warning for blank values (rows kept).
+
+    Blank-country rows are flagged in rejected (not dropped) when rejected is provided.
+    """
+    blank = df["country"].isna() | (df["country"] == "")
+    for cid in df.loc[blank, "customer_id"]:
+        logger.warning(f"Customer {cid} has blank country")
+    if rejected is not None:
+        rejected.add(df[blank], "blank country (row kept)")
+    df["country"] = df["country"].str.upper()
+    return df
+
+
+def parse_customer_signup_date(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Parse signup_date; return (clean, rejected) where rejected holds unparseable rows."""
+    parsed = pd.to_datetime(df["signup_date"], format="%Y-%m-%d", errors="coerce")
+    bad = parsed.isna()
+    for cid in df.loc[bad, "customer_id"]:
+        logger.warning(f"Customer {cid} has invalid signup_date — row dropped")
+    clean = df[~bad].copy()
+    clean["signup_date"] = parsed[~bad]
+    return clean, df[bad].copy()
+
+
+def drop_duplicate_customers(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Keep the first occurrence of each customer_id; return (clean, rejected duplicates)."""
+    dupes = df.duplicated(subset="customer_id", keep="first")
+    for cid in df.loc[dupes, "customer_id"]:
+        logger.warning(f"Duplicate customer_id {cid} — keeping first occurrence, dropping duplicate")
+    return df[~dupes].copy(), df[dupes].copy()
+
+
+# --- subscriptions ---
+
+def clean_subscriptions(
+    raw: pd.DataFrame,
+    valid_customer_ids: set[str],
+    source: str = "subscriptions",
+) -> tuple[pd.DataFrame, RejectedRows]:
     """
     Validate and clean the subscriptions DataFrame.
 
-    Drops rows with invalid start_date, invalid end_date (non-blank), non-numeric
-    monthly_price, end_date < start_date, or unknown customer_id. Blank/whitespace
-    end_date is treated as NaT (active subscription). Warns about overlapping
-    subscriptions per customer but keeps them.
+    Drops rows with unknown customer_id, invalid start_date, invalid end_date (non-blank),
+    non-numeric monthly_price, or end_date < start_date. Blank/whitespace end_date is
+    treated as NaT (active subscription). Overlapping subscriptions are flagged but kept.
+
+    Returns (clean_df, rejected) where rejected accumulates all dropped rows with reasons.
     """
-    df = raw.copy()
+    rejected = RejectedRows(source=source)
+    df = strip_strings(raw.copy())
+    df, rej = drop_unknown_customers(df, valid_customer_ids)
+    rejected.add(rej, "unknown customer_id")
+    df, rej = parse_start_date(df)
+    rejected.add(rej, "invalid start_date")
+    df, rej = parse_end_date(df)
+    rejected.add(rej, "invalid end_date")
+    df, rej = parse_monthly_price(df)
+    rejected.add(rej, "non-numeric monthly_price")
+    df, rej = drop_invalid_date_range(df)
+    rejected.add(rej, "end_date before start_date")
+    warn_overlapping(df)
+    return df.reset_index(drop=True), rejected
 
-    # Strip whitespace from all string columns before any parsing
-    for col in df.select_dtypes(include=["object", "str"]).columns:
-        df[col] = df[col].str.strip()
 
-    # Drop rows with unknown customer_id
-    unknown = ~df["customer_id"].isin(valid_customer_ids)
+def drop_unknown_customers(df: pd.DataFrame, valid_ids: set[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Drop rows whose customer_id is not in valid_ids; return (clean, rejected)."""
+    unknown = ~df["customer_id"].isin(valid_ids)
     for cid in df.loc[unknown, "customer_id"].unique():
         logger.warning(f"Subscription references unknown customer_id {cid} — rows dropped")
-    df = df[~unknown].copy()
+    return df[~unknown].copy(), df[unknown].copy()
 
-    # Parse start_date — drop rows that fail
-    parsed_start = pd.to_datetime(df["start_date"], format="%Y-%m-%d", errors="coerce")
-    bad_start = parsed_start.isna()
-    for cid in df.loc[bad_start, "customer_id"]:
-        logger.warning(f"Subscription for {cid} has invalid start_date '{df.loc[bad_start & (df['customer_id'] == cid), 'start_date'].iloc[0]}' — row dropped")
-    df = df[~bad_start].copy()
-    df["start_date"] = parsed_start[~bad_start]
 
-    # Parse end_date — blank/whitespace → NaT (active); invalid non-blank → drop
-    end_raw = df["end_date"].fillna("")
-    blank_end = end_raw == ""
-    parsed_end = pd.to_datetime(df["end_date"].where(~blank_end), format="%Y-%m-%d", errors="coerce")
-    # Rows where end_date was non-blank but failed to parse
-    bad_end = (~blank_end) & parsed_end.isna()
-    for cid in df.loc[bad_end, "customer_id"]:
+def parse_start_date(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Parse start_date; return (clean, rejected) where rejected holds unparseable rows."""
+    parsed = pd.to_datetime(df["start_date"], format="%Y-%m-%d", errors="coerce")
+    bad = parsed.isna()
+    for cid in df.loc[bad, "customer_id"]:
+        raw_val = df.loc[bad & (df["customer_id"] == cid), "start_date"].iloc[0]
+        logger.warning(f"Subscription for {cid} has invalid start_date '{raw_val}' — row dropped")
+    clean = df[~bad].copy()
+    clean["start_date"] = parsed[~bad]
+    return clean, df[bad].copy()
+
+
+def parse_end_date(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Parse end_date; blank/whitespace → NaT (active). Return (clean, rejected) for invalid non-blank."""
+    blank = df["end_date"].fillna("") == ""
+    parsed = pd.to_datetime(df["end_date"].where(~blank), format="%Y-%m-%d", errors="coerce")
+    bad = (~blank) & parsed.isna()
+    for cid in df.loc[bad, "customer_id"]:
         logger.warning(f"Subscription for {cid} has invalid end_date — row dropped")
-    df = df[~bad_end].copy()
-    df["end_date"] = parsed_end[~bad_end]  # NaT for both blank and truly active
+    clean = df[~bad].copy()
+    clean["end_date"] = parsed[~bad]
+    return clean, df[bad].copy()
 
-    # Cast monthly_price to float — drop rows that fail
-    numeric_price = pd.to_numeric(df["monthly_price"], errors="coerce")
-    bad_price = numeric_price.isna()
-    for cid in df.loc[bad_price, "customer_id"]:
-        logger.warning(f"Subscription for {cid} has non-numeric monthly_price '{df.loc[bad_price & (df['customer_id'] == cid), 'monthly_price'].iloc[0]}' — row dropped")
-    df = df[~bad_price].copy()
-    df["monthly_price"] = numeric_price[~bad_price]
 
-    # Drop rows where end_date < start_date
-    invalid_range = df["end_date"].notna() & (df["end_date"] < df["start_date"])
-    for cid in df.loc[invalid_range, "customer_id"]:
+def parse_monthly_price(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Cast monthly_price to float; return (clean, rejected) where rejected holds non-numeric rows."""
+    parsed = pd.to_numeric(df["monthly_price"], errors="coerce")
+    bad = parsed.isna()
+    for cid in df.loc[bad, "customer_id"]:
+        raw_val = df.loc[bad & (df["customer_id"] == cid), "monthly_price"].iloc[0]
+        logger.warning(f"Subscription for {cid} has non-numeric monthly_price '{raw_val}' — row dropped")
+    clean = df[~bad].copy()
+    clean["monthly_price"] = parsed[~bad]
+    return clean, df[bad].copy()
+
+
+def drop_invalid_date_range(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Drop rows where end_date is set but precedes start_date; return (clean, rejected)."""
+    invalid = df["end_date"].notna() & (df["end_date"] < df["start_date"])
+    for cid in df.loc[invalid, "customer_id"]:
         logger.warning(f"Subscription for {cid} has end_date before start_date — row dropped")
-    df = df[~invalid_range].reset_index(drop=True)
-
-    # Warn about overlapping subscriptions per customer (keep both)
-    _warn_overlapping(df)
-
-    return df.reset_index(drop=True)
+    return df[~invalid].copy(), df[invalid].copy()
 
 
-def _warn_overlapping(df: pd.DataFrame) -> None:
+def warn_overlapping(df: pd.DataFrame) -> None:
     """Log a warning for each customer that has overlapping subscription periods."""
     for cid, group in df.groupby("customer_id"):
         g = group.sort_values("start_date").reset_index(drop=True)
         for i in range(len(g) - 1):
             curr_end = g.loc[i, "end_date"]
             next_start = g.loc[i + 1, "start_date"]
-            # If current sub has no end_date (active) or ends after next starts
             if pd.isna(curr_end) or curr_end >= next_start:
                 logger.warning(
                     f"Customer {cid} has overlapping subscriptions "

@@ -37,6 +37,21 @@ matching standard SaaS cohort conventions). A customer is "active" at that targe
 they have any subscription where `start_date ≤ target_date` and
 `(end_date is null OR end_date ≥ target_date)`.
 
+## Data Quality & Quarantine
+
+Cleaning functions return both the clean DataFrame and a `RejectedRows` object (from
+`src/error_sink.py`). Each dropped row is tagged with a `_rejection_reason` column. At the
+end of the cleaning phase, `write_quarantine()` writes one `<source>_errors.csv` per input
+file under `quarantine/<timestamp>/`, creating the directory only when there is something to
+write. This gives operators a per-run audit trail of every discarded record without
+interrupting the pipeline.
+
+Rows with non-fatal issues (blank country, overlapping subscriptions) are kept in the clean
+output but also flagged in the quarantine file so they remain visible.
+
+The `quarantine/` directory and `output.json` are excluded from version control via
+`.gitignore` — they are runtime artifacts, not source files.
+
 ## Adding a New Metric
 
 1. Add a pure function `compute_<metric>(...)` to `src/transformer.py`.
