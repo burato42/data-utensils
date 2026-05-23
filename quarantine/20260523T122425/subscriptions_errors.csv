@@ -1,0 +1,7 @@
+customer_id,start_date,end_date,plan,monthly_price,_rejection_reason
+C019,2024-07-15,,basic,30,unknown customer_id
+C999,2024-10-01,,basic,15,unknown customer_id
+C050,2024-09-01,,basic,25,unknown customer_id
+C005,2024-02-28 00:00:00,2024-02-30,basic,20,invalid end_date
+C021,2024-08-02 00:00:00,,basic,thirty,non-numeric monthly_price
+C026,2024-09-29 00:00:00,2024-08-20 00:00:00,basic,20.0,end_date before start_date

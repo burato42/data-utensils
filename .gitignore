@@ -46,7 +46,7 @@ htmlcov/
 # macOS
 .DS_Store
 
-# Output files
-output.json
-quarantine/
 
+# Output files
+# output.json
+# quarantine/

@@ -49,8 +49,8 @@ interrupting the pipeline.
 Rows with non-fatal issues (blank country, overlapping subscriptions) are kept in the clean
 output but also flagged in the quarantine file so they remain visible.
 
-The `quarantine/` directory and `output.json` are excluded from version control via
-`.gitignore` — they are runtime artifacts, not source files.
+The `quarantine/` directory and `output.json` should be in `.gitignore` — they are runtime artifacts, not source files. But I removed them from there for the demostration purposes.
+
 
 ## Adding a New Metric
 

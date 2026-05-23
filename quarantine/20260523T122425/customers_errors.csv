@@ -1,0 +1,4 @@
+customer_id,signup_date,country,_rejection_reason
+C027,2024-10-03,,blank country (row kept)
+C019,2024-13-05,NL,invalid signup_date
+C038,2024-12-29 00:00:00,DE,duplicate customer_id
