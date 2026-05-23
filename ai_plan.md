@@ -218,3 +218,62 @@ Let's add requirements.txt containig the corresponding libraries to make an alte
 
 ## Prompt
 And now let's create a concise README with very basic information on how to run the pipeline and the tests.
+
+## Prompt
+
+The question: no need to implement it. We have plain structure in the components: should we use static methods or even class methods to make a chain of processing intead of the code like this
+
+
+```
+    rejected = RejectedRows(source=source)
+    df = strip_strings(raw.copy())
+    df, rej = drop_unknown_customers(df, valid_customer_ids)
+    rejected.add(rej, "unknown customer_id")
+    df, rej = parse_start_date(df)
+    rejected.add(rej, "invalid start_date")
+    df, rej = parse_end_date(df)
+    rejected.add(rej, "invalid end_date")
+    df, rej = parse_monthly_price(df)
+    rejected.add(rej, "non-numeric monthly_price")
+    df, rej = drop_invalid_date_range(df)
+    rejected.add(rej, "end_date before start_date")
+    warn_overlapping(df)
+    return df.reset_index(drop=True), rejected
+```?
+```
+Good question. A few options worth considering:
+
+Option 1: Pipeline/builder pattern on a class
+Wrap (df, rejected) in a CleaningPipeline object with chainable methods:
+
+
+result = (
+    CleaningPipeline(raw, source)
+    .strip()
+    .drop_unknown(valid_ids)
+    .parse_start_date()
+    .parse_end_date()
+    .parse_price()
+    .drop_invalid_range()
+    .warn_overlapping()
+    .build()  # → (clean_df, rejected)
+)
+Reads like a recipe, each step is self-contained. The tradeoff: it's a new abstraction that needs to be understood before the code makes sense, and it doesn't gain you much over the current imperative style beyond aesthetics.
+
+Option 2: List of (function, reason) steps
+
+
+steps = [
+    (drop_unknown_customers, "unknown customer_id"),
+    (parse_start_date,       "invalid start_date"),
+    ...
+]
+for fn, reason in steps:
+    df, rej = fn(df)
+    rejected.add(rej, reason)
+Very compact, easy to add/remove/reorder steps. The tradeoff: functions with extra arguments (like drop_unknown_customers(df, valid_ids)) need wrapping — either functools.partial or lambdas — which adds noise.
+
+My recommendation: stay with what you have. The current code is already easy to read top-to-bottom, explicit about the order of operations, and handles the valid_ids argument naturally without any ceremony. The repetitive df, rej = ...; rejected.add(...) pattern is mechanical but not confusing — it's the same two lines each time and a reader knows exactly what's happening.
+
+The builder pattern would be worthwhile if the pipeline steps were dynamic (loaded from config, user-selectable) or if there were many more of them. At 5–6 fixed steps it adds indirection without a real payoff.
+```
